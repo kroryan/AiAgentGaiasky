@@ -9,6 +9,40 @@ wrapper script, not a Gaia Sky plugin or dataset.
 
 For day-to-day usage once it's running, see [GUIDE.md](GUIDE.md).
 
+## 0. Quick install (recommended)
+
+`install.sh` (Linux/macOS) and `install.bat` (Windows), at the repository root, do
+everything in one step: create a virtual environment, install dependencies, enable
+Gaia Sky's REST API if it isn't already (backing up `config.yaml` first), and set the
+assistant to start automatically with your desktop session — a systemd `--user`
+service where available, an XDG autostart entry otherwise on Linux, or a Startup
+folder shortcut on Windows. Safe to re-run any time; every step is skipped if it was
+already done.
+
+```bash
+./install.sh          # Linux/macOS
+```
+
+```bat
+install.bat            :: Windows
+```
+
+To remove the autostart entry later (and optionally the virtual environment):
+
+```bash
+./uninstall.sh          # add --purge to also delete .venv
+```
+
+```bat
+uninstall.bat           :: add --purge to also delete .venv
+```
+
+Neither installer touches Gaia Sky's source or install directory; the only file it
+ever writes to outside this repository is Gaia Sky's own `config.yaml`, and only the
+single `restPort` line in it (backed up first). Sections 1–3 below explain what these
+scripts automate, for anyone who wants to do it by hand instead or understand exactly
+what changed.
+
 ## 1. Manual installation
 
 ```bash
