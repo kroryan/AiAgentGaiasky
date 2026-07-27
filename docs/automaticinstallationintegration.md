@@ -28,17 +28,6 @@ through (see [INSTALL.md](INSTALL.md)). It is not comparable to the one-click
 experience Gaia Sky already gives users for datasets, which is the bar users
 reasonably expect for anything advertised as "just works."
 
-## What is *not* being proposed
-
-To be unambiguous about scope, given the history here:
-
-- **Not** bundling this or any other agent inside Gaia Sky.
-- **Not** adding a plugin runtime, sandboxed execution environment, or process
-  supervisor to Gaia Sky. Gaia Sky would not launch, monitor, or manage the external
-  tool's process.
-- **Not** any network call Gaia Sky makes on the user's behalf to fetch or run
-  third-party code automatically. Any install step remains an explicit user action.
-- **Not** a new maintenance surface tied to any one external tool's release cycle.
 
 ## What could actually help: a `restApiClients` registry, nothing more
 
@@ -85,8 +74,6 @@ read one. Gaia Sky's role stays passive: display what's registered, offer the RE
 toggle, offer to run a listed command. It never fetches, verifies, or vouches for what
 an entry points to; that trust decision stays the user's, exactly as it is when they
 run any other installer today.
-
-## Why this is worth doing regardless of any one tool
 
 The REST/scripting API is a public, documented surface that already invites external
 tools — this project is simply the first to need a real installer story. A registry
