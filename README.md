@@ -22,9 +22,14 @@ is that external harness.
 
 ## Features
 
-- **~40 tools** covering navigation (fly to / land on / focus / track objects), time
+- **~55 tools** covering navigation (fly to / land on / focus / track objects), time
   control, visibility toggles, dataset management, rendering adjustments, on-screen
-  text, and more — the same catalog of actions the original in-app assistant had.
+  text, and more — the same catalog of actions the original in-app assistant had, plus
+  a few of this project's own: bulk object verification for planning long tours, and
+  saving notes/lists to plain text files that outlive the chat.
+- **Long tours just work**: asking for a tour of dozens of objects (a list of nebulae,
+  every planet and moon, etc.) is not capped — the agent narrates between stops and
+  keeps going for as many as were asked for.
 - **Two LLM backends**: a local [Ollama](https://ollama.com) server (native API) or any
   OpenAI-compatible endpoint (OpenAI itself, LM Studio, vLLM, Ollama Cloud, etc.).
 - **Overlay UI**: frameless, translucent, always-on-top panel with Markdown rendering

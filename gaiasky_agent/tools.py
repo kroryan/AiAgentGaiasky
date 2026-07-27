@@ -232,6 +232,7 @@ class ToolRegistry:
         self._register_graphics()
         self._register_interface()
         self._register_flow()
+        self._register_notes()
 
     # ==================================================================== navigation
 
@@ -506,9 +507,40 @@ class ToolRegistry:
         self._add(Tool(
             "find_object",
             "Check whether an object exists in the currently loaded datasets. Use this to verify a name "
-            "before acting on it, or when the user asks whether something is available.",
+            "before acting on it, or when the user asks whether something is available. To check many "
+            "names at once, such as every stop of a long tour, use find_objects instead: it does the work "
+            "in a single call rather than one per name.",
             [Param.str("name", "Name or identifier to look for.", True)],
             False, find_object))
+
+        def find_objects(args: dict) -> str:
+            raw = require_string(args, "names")
+            names = [n.strip() for n in raw.replace("\n", ",").split(",") if n.strip()]
+            if not names:
+                raise ToolError("No names given.")
+            if len(names) > 80:
+                raise ToolError(f"Got {len(names)} names; at most 80 fit in one call. Split into batches.")
+            found, missing = [], []
+            for candidate in names:
+                if self._object_position(candidate) is not None:
+                    found.append(candidate)
+                else:
+                    missing.append(candidate)
+            parts = []
+            if found:
+                parts.append(f"Present ({len(found)}): " + ", ".join(found) + ".")
+            if missing:
+                parts.append(f"Not found ({len(missing)}): " + ", ".join(missing) + ".")
+            return " ".join(parts)
+
+        self._add(Tool(
+            "find_objects",
+            "Check whether many objects exist in the currently loaded datasets, in one call. Use this to "
+            "verify every stop of a tour before starting it, instead of calling find_object once per name. "
+            "Reports which of the given names are present and which are not.",
+            [Param.str("names", "The names or identifiers to check, separated by commas or newlines. "
+                       "Up to 80 per call.", True)],
+            False, find_objects))
 
         def search_objects(args: dict) -> str:
             query = require_string(args, "query")
@@ -1133,6 +1165,92 @@ class ToolRegistry:
                        "'contemplating Saturn'.", False)],
             False, wait))
 
+    # ==================================================================== notes and lists
+    #
+    # Plain text files on disk, entirely local to this app (no REST calls). They give the
+    # model somewhere durable to put a tour plan, an itinerary, a checklist or any other
+    # list-shaped output the user wants to keep, independent of chat scrollback. They also
+    # let the model build up a long-running task (a 40-stop tour, say) incrementally across
+    # many turns without having to hold the whole thing in one reply.
+
+    def _register_notes(self) -> None:
+        def notes_dir():
+            from .config import config_dir
+            directory = config_dir() / "notes"
+            directory.mkdir(parents=True, exist_ok=True)
+            return directory
+
+        def note_path(title: str):
+            safe = "".join(c if c.isalnum() or c in " ._-" else "_" for c in title).strip(" .") or "note"
+            return notes_dir() / (safe[:120] + ".txt")
+
+        def save_note(args: dict) -> str:
+            title = require_string(args, "title")
+            content = require_string(args, "content")
+            append = optional_bool(args, "append", False)
+            path = note_path(title)
+            if append and path.exists():
+                with path.open("a", encoding="utf-8") as f:
+                    f.write("\n" + content)
+                return f"Appended to '{title}' at {path}."
+            path.write_text(content, encoding="utf-8")
+            return f"Saved '{title}' to {path}."
+
+        self._add(Tool(
+            "save_note",
+            "Save a piece of text to a plain text file the user can keep, independent of this chat. Use "
+            "this for anything list-shaped or worth keeping as a document: a tour itinerary, a list of "
+            "objects with notes on each, a checklist, a summary. Also useful for building up a long task "
+            "over many turns, such as logging each stop of a long tour as you go, so the work survives "
+            "even if the conversation is interrupted. Writing to an existing title overwrites it unless "
+            "'append' is set.",
+            [Param.str("title", "A short name for the note, used as its file name.", True),
+             Param.str("content", "The text to write. May be as long as needed, and may use Markdown "
+                       "formatting such as lists and headings.", True),
+             Param.bool("append", "True to add this content to the end of an existing note instead of "
+                        "replacing it. Defaults to false.", False)],
+            True, save_note))
+
+        def read_note(args: dict) -> str:
+            title = require_string(args, "title")
+            path = note_path(title)
+            if not path.exists():
+                raise ToolError(f"No note named '{title}'. Use list_notes to see what is saved.")
+            return path.read_text(encoding="utf-8")
+
+        self._add(Tool(
+            "read_note",
+            "Read back a note saved earlier with save_note. Use this to check progress on a long-running "
+            "task, or to recall a list written down in an earlier turn.",
+            [Param.str("title", "Name of the note to read.", True)],
+            False, read_note))
+
+        def list_notes(args: dict) -> str:
+            paths = sorted(notes_dir().glob("*.txt"), key=lambda p: p.stat().st_mtime, reverse=True)
+            if not paths:
+                return "No notes saved yet."
+            return "Saved notes: " + ", ".join(p.stem for p in paths) + "."
+
+        self._add(Tool(
+            "list_notes",
+            "List the titles of all notes saved so far with save_note.",
+            [], False, list_notes))
+
+        def delete_note(args: dict) -> str:
+            title = require_string(args, "title")
+            path = note_path(title)
+            if not path.exists():
+                raise ToolError(f"No note named '{title}'.")
+            path.unlink()
+            return f"Deleted note '{title}'."
+
+        self._add(Tool(
+            "delete_note",
+            "Delete a note saved earlier with save_note. Use this only when the user asks to remove or "
+            "clear one, not to tidy up on your own initiative.",
+            [Param.str("title", "Name of the note to delete.", True)],
+            True, delete_note))
+
 
 SYSTEM_PROMPT = """\
 You are the in-app assistant for Gaia Sky, an open-source astronomy visualization program that renders \
@@ -1155,7 +1273,12 @@ Explain the astronomy when it adds something, but do not lecture.
 - Replies are rendered as Markdown, so headings, lists, tables, code fences and emphasis all display \
 properly. Use them where they help, and prose where they do not; a table is for comparing figures, \
 not for narrating a journey.
-- When planning a tour or a sequence of actions involving specific celestial objects, use the search_objects or find_object tools to verify their presence in the currently loaded datasets before promising to visit them. However, for general knowledge questions, you may answer based on your internal knowledge even if the object is not loaded.
+- When planning a tour or a sequence of actions involving specific celestial objects, verify their \
+presence in the currently loaded datasets before promising to visit them. For more than a couple of \
+names, check them all in one go with find_objects (one call, names separated by commas) rather than \
+calling find_object once per name — this matters for long tours, where checking forty names one by one \
+would be needlessly slow. However, for general knowledge questions, you may answer based on your \
+internal knowledge even if the object is not loaded.
 
 Guided tours:
 - A tour means flying the camera. Listing the objects instead is not a tour, and is not what \
@@ -1163,7 +1286,10 @@ was asked for. Begin the first stop straight away, in the same turn the tour is 
 go_to_object before you write anything else. Never answer a tour request with a table, a list or a \
 plan, and never offer to fly somewhere "if you like" — the user has already asked you to.
 - Do not change camera modes (like toggling cinematic camera or changing field of view) during a tour unless explicitly requested.
-- Work through the tour yourself from beginning to end, without stopping to ask whether to continue.
+- Work through the tour yourself from beginning to end, without stopping to ask whether to continue. \
+This applies just as much to a long tour (dozens of stops) as to a short one: keep going, stop after \
+stop, until every one has been visited. There is no limit on how many stops you may make in one tour; \
+narrating between flights is enough to keep going indefinitely.
 - Do as many stops as the user asked for. If they ask for a hundred objects, visit a hundred; the \
 length of a tour is theirs to decide, not yours. Never refuse or shorten one because it seems long, \
 and never propose a smaller number instead. The user can stop you at any moment.
@@ -1174,6 +1300,10 @@ tool with that many seconds after narrating and before moving on. The pause is r
 wait by writing filler, and never skip a pause the user asked for.
 - Never call go_to_object twice in the same turn. The second call will be declined, because the user \
 would otherwise arrive somewhere new before hearing about the last place.
+- If the user wants a written itinerary of a tour, a list of objects to visit later, or any other list-\
+shaped text kept as a document, use save_note rather than only putting it in your reply — that way it \
+survives after the chat scrolls away. This is separate from actually running a tour: a note is a list \
+kept for later, not a substitute for flying the camera when a tour is asked for.
 
 Working with tools:
 - Do what is asked. Never decline a request because it involves a lot of steps, and never ask for \

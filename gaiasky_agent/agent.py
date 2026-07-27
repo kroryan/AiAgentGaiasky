@@ -24,10 +24,23 @@ from .tools import ToolError, ToolRegistry, system_prompt
 
 logger = logging.getLogger(__name__)
 
-# How many times one tool may be used in a row, with nothing else in between,
-# before the run is broken. Does not bound how much work an exchange may do:
-# a tour alternates between flying and explaining, so it never trips this.
+# How many times one *mutating* tool may be used in a row, with nothing else in
+# between, before the run is broken. Does not bound how much work an exchange may
+# do: a tour alternates between flying and explaining, so it never trips this (see
+# _NARRATED below for how narration counts as "something in between").
 MAX_CONSECUTIVE_CALLS = 6
+
+# Read-only tools (find_object, get_object_info, ...) get a much looser cap: calling
+# one of them many times in a row is normal, expected work when a task involves many
+# objects (checking every stop of a 40-object tour before starting it), not a sign of
+# being stuck the way repeating a mutating call is.
+MAX_CONSECUTIVE_READONLY_CALLS = 40
+
+# Appended to `recent` whenever the model narrates prose in a round, so that the
+# run-length scan in _refuse sees it and resets: narrating between two tool calls of
+# the same name means the model *did* do something else in between, even though it
+# was not itself a tool call.
+_NARRATED = "\0narrated"
 
 
 @dataclass
@@ -149,6 +162,7 @@ class Agent:
 
             if response.content and response.content.strip():
                 listener.on_assistant_message(response.content.strip())
+                recent.append(_NARRATED)
 
             travelled = False
             for call in response.tool_calls:
@@ -187,13 +201,16 @@ class Agent:
                 run += 1
             else:
                 break
-        if run >= MAX_CONSECUTIVE_CALLS:
+        tool = self.registry.get(call.name)
+        limit = MAX_CONSECUTIVE_READONLY_CALLS if tool is not None and not tool.mutating else MAX_CONSECUTIVE_CALLS
+        if run >= limit:
             return (f"Not performed. You have called '{call.name}' {run} times in a row with nothing "
                     f"in between, which suggests you are stuck. Do the next part of the task with a "
                     f"different tool, or answer the user now.")
 
         recent.append(signature)
-        while len(recent) > MAX_CONSECUTIVE_CALLS + 1:
+        cap = max(MAX_CONSECUTIVE_CALLS, MAX_CONSECUTIVE_READONLY_CALLS) + 1
+        while len(recent) > cap:
             recent.pop(0)
         return None
 
