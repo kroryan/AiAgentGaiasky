@@ -14,6 +14,7 @@ REST-reachable equivalent of the internal calls they used.
 
 from __future__ import annotations
 
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -29,6 +30,43 @@ MIN_ANIMATION_SECONDS = 1.0
 SMOOTH_TYPE = "logisticsigmoid"
 
 EXCLUSIVE_TOOLS = {"go_to_object", "go_to_object_instant", "land_on"}
+
+# Exoplanet designations end in a lowercase letter (b, c, d, ...) naming the
+# planet within its system, either joined to the host star ("Kepler-442b",
+# "TRAPPIST-1e") or space-separated ("HD 40307 g", "55 Cancri e"). Several
+# catalogues (e.g. the NASA Exoplanet Archive dataset) only instantiate a
+# system's actual planets once the camera approaches its star -- distant
+# systems are shown as a single glyph -- so an exact, correctly-named planet
+# can legitimately not exist in the live scene yet. These patterns let tools
+# recover the host star (always loaded) and/or the correctly-spaced planet
+# name, instead of reporting a false "not found".
+_PLANET_SUFFIX_JOINED = re.compile(r"^(.+\d)([b-z])$")
+_PLANET_SUFFIX_SPACED = re.compile(r"^(.+)\s([b-z])$")
+
+
+def _spaced_planet_variant(name: str) -> str | None:
+    """'Kepler-442b' -> 'Kepler-442 b'; None if name has no joined planet suffix."""
+    m = _PLANET_SUFFIX_JOINED.match(name)
+    return f"{m.group(1)} {m.group(2)}" if m else None
+
+
+# A few well-known stars are catalogued under an abbreviated form. Verified
+# against the NASA Exoplanet Archive dataset's own descriptors (which name it
+# "Proxima Cen", not "Proxima Centauri"); kept short and explicit rather than
+# guessing at a general full-name-to-IAU-abbreviation rule.
+_STAR_ALIASES = {
+    "proxima centauri": "Proxima Cen",
+}
+
+
+def _alias_variant(name: str) -> str | None:
+    return _STAR_ALIASES.get(name.strip().lower())
+
+
+def _host_star_guess(name: str) -> str | None:
+    """'Kepler-442b' or 'Kepler-442 b' -> 'Kepler-442'; None if no planet suffix."""
+    m = _PLANET_SUFFIX_SPACED.match(name) or _PLANET_SUFFIX_JOINED.match(name)
+    return m.group(1) if m else None
 
 # From gaiasky.render.ComponentTypes.ComponentType: every category but Invisible.
 COMPONENT_TYPES = [
@@ -223,6 +261,37 @@ class ToolRegistry:
                 f"Check the spelling, or try a catalogue identifier."
             )
 
+    def _resolve_navigable_name(self, name: str) -> tuple[str, str]:
+        """
+        Resolves a name to fly to, tolerating the two exoplanet-specific gotchas:
+        a missing space before the planet letter, and catalogues (e.g. the NASA
+        Exoplanet Archive dataset) that only instantiate a system's planets once
+        the camera nears its star. Returns (target_name, note), where note is a
+        non-empty explanation to append to the result if the target had to be
+        substituted for the requested name.
+        """
+        if self._object_position(name) is not None:
+            return name, ""
+        alias = _alias_variant(name)
+        if alias and self._object_position(alias) is not None:
+            return alias, ""
+        spaced = _spaced_planet_variant(name)
+        if spaced and self._object_position(spaced) is not None:
+            return spaced, ""
+        star = _host_star_guess(name)
+        if star:
+            star = _alias_variant(star) or star
+        if star and star != name and self._object_position(star) is not None:
+            return star, (
+                f" Note: '{name}' is not individually loaded right now -- in this catalogue, a system's "
+                f"planets only materialize once the camera nears its star. Flew to the host star '{star}' "
+                f"instead; '{name}' should appear on arrival, and this can be called again once there."
+            )
+        raise ToolError(
+            f"No object named '{name}' exists in the loaded datasets. "
+            f"Check the spelling, or try a catalogue identifier."
+        )
+
     def _register(self) -> None:
         self._register_navigation()
         self._register_queries()
@@ -244,31 +313,36 @@ class ToolRegistry:
             duration = max(MIN_ANIMATION_SECONDS, animation_seconds(args, 5.0))
             angle = optional_double(args, "angle", 5.0)
             wait = optional_bool(args, "wait", True)
-            self._verify_object_exists(name)
+            target, note = self._resolve_navigable_name(name)
             if wait:
                 client.call("camera", "go_to_object",
-                            {"name": name, "sa": angle, "pos_duration": duration,
+                            {"name": target, "sa": angle, "pos_duration": duration,
                              "ori_duration": duration, "sync": True},
                             timeout=duration + 60)
                 if self.stop.is_set():
-                    return f"The flight to {name} was interrupted."
-                client.call("camera", "focus_mode", {"name": name})
-                distance = client.call("camera", "get_distance_to_object", {"name": name})
+                    return f"The flight to {target} was interrupted."
+                client.call("camera", "focus_mode", {"name": target})
+                distance = client.call("camera", "get_distance_to_object", {"name": target})
                 if distance is not None and distance >= 0:
-                    return (f"The camera has arrived at {name} and is focused on it. "
-                            f"Distance to its surface: {format_number(distance)} km.")
-                return f"The camera has arrived at {name} and is focused on it."
+                    return (f"The camera has arrived at {target} and is focused on it. "
+                            f"Distance to its surface: {format_number(distance)} km.{note}")
+                return f"The camera has arrived at {target} and is focused on it.{note}"
             client.call("camera", "go_to_object",
-                        {"name": name, "sa": angle, "pos_duration": duration,
+                        {"name": target, "sa": angle, "pos_duration": duration,
                          "ori_duration": duration, "sync": False})
-            return f"The camera is now flying to {name}, which takes about {format_number(duration)} seconds."
+            return f"The camera is now flying to {target}, which takes about {format_number(duration)} seconds.{note}"
 
         self._add(Tool(
             "go_to_object",
             "Fly the camera to an object and focus on it. Use this whenever the user asks to visit, travel "
             "to, go to, or take a closer look at something. By default this waits until the camera "
             "has arrived, so that anything you say afterwards describes what is actually on screen. "
-            "Accepts object names and catalogue identifiers such as HIP 87937.",
+            "Accepts object names and catalogue identifiers such as HIP 87937. For exoplanets, just pass "
+            "the name as given ('Kepler-442b', 'TRAPPIST-1 e'): this already tries the correctly-spaced "
+            "form and, if the exact planet is not yet instantiated (some catalogues only load a system's "
+            "planets once the camera nears its star), flies to the host star instead and says so -- that "
+            "is success, not failure; call this again with the same planet name once there to reach it "
+            "directly. Try this tool before concluding an object is unavailable.",
             [Param.str("name", "Name or identifier of the object, for example 'Mars', 'Betelgeuse' or 'HIP 87937'.", True),
              Param.num("duration", "Duration of the flight in seconds. Defaults to 5.", False),
              Param.num("angle", "Target solid angle in degrees. Controls how close the camera gets. 20 is close, "
@@ -279,9 +353,9 @@ class ToolRegistry:
 
         def go_to_object_instant(args: dict) -> str:
             name = require_string(args, "name")
-            self._verify_object_exists(name)
-            client.call("camera", "go_to_object_instant", {"name": name})
-            return f"The camera is now at {name}."
+            target, note = self._resolve_navigable_name(name)
+            client.call("camera", "go_to_object_instant", {"name": target})
+            return f"The camera is now at {target}.{note}"
 
         self._add(Tool(
             "go_to_object_instant",
@@ -499,17 +573,34 @@ class ToolRegistry:
 
         def find_object(args: dict) -> str:
             name = require_string(args, "name")
-            found = self._object_position(name) is not None
-            return (f"Yes, '{name}' exists in the loaded datasets." if found else
-                    f"No object named '{name}' is present. It may not be in the loaded datasets, "
+            if self._object_position(name) is not None:
+                return f"Yes, '{name}' exists in the loaded datasets."
+            alias = _alias_variant(name)
+            if alias and self._object_position(alias) is not None:
+                return f"Yes, it exists under the catalogue's name '{alias}'."
+            spaced = _spaced_planet_variant(name)
+            if spaced and self._object_position(spaced) is not None:
+                return f"Yes, it exists as '{spaced}' (note the space before the planet letter)."
+            star = _host_star_guess(name)
+            if star:
+                star = _alias_variant(star) or star
+            if star and star != name and self._object_position(star) is not None:
+                return (f"'{name}' is not individually loaded right now, but its host star '{star}' is. "
+                        f"In this catalogue, a system's planets only materialize once the camera nears its "
+                        f"star -- go there first (go_to_object) and '{name}' should appear on arrival.")
+            return (f"No object named '{name}' is present. It may not be in the loaded datasets, "
                     f"or it may be known under a different name or catalogue identifier.")
 
         self._add(Tool(
             "find_object",
             "Check whether an object exists in the currently loaded datasets. Use this to verify a name "
-            "before acting on it, or when the user asks whether something is available. To check many "
-            "names at once, such as every stop of a long tour, use find_objects instead: it does the work "
-            "in a single call rather than one per name.",
+            "before acting on it, or when the user asks whether something is available -- but for actually "
+            "going somewhere, prefer calling go_to_object directly rather than checking first, since it "
+            "already handles exoplanet spacing and host-star fallback on its own. A negative result here "
+            "is not final for exoplanets: it already reports when the exact planet is not instantiated yet "
+            "but its host star is, meaning it is real and reachable, just not the final word on 'not found'. "
+            "To check many names at once, such as every stop of a long tour, use find_objects instead: it "
+            "does the work in a single call rather than one per name.",
             [Param.str("name", "Name or identifier to look for.", True)],
             False, find_object))
 
@@ -520,15 +611,26 @@ class ToolRegistry:
                 raise ToolError("No names given.")
             if len(names) > 80:
                 raise ToolError(f"Got {len(names)} names; at most 80 fit in one call. Split into batches.")
-            found, missing = [], []
+            found, pending, missing = [], [], []
             for candidate in names:
                 if self._object_position(candidate) is not None:
                     found.append(candidate)
-                else:
-                    missing.append(candidate)
+                    continue
+                spaced = _spaced_planet_variant(candidate)
+                if spaced and self._object_position(spaced) is not None:
+                    found.append(spaced)
+                    continue
+                star = _host_star_guess(candidate)
+                if star and star != candidate and self._object_position(star) is not None:
+                    pending.append(f"{candidate} (star '{star}' is loaded; fly there to make it appear)")
+                    continue
+                missing.append(candidate)
             parts = []
             if found:
                 parts.append(f"Present ({len(found)}): " + ", ".join(found) + ".")
+            if pending:
+                parts.append(f"Not instantiated yet, but reachable via their star ({len(pending)}): "
+                              + ", ".join(pending) + ".")
             if missing:
                 parts.append(f"Not found ({len(missing)}): " + ", ".join(missing) + ".")
             return " ".join(parts)
@@ -552,6 +654,12 @@ class ToolRegistry:
             for variant in (query, query.title(), query.upper(), query.lower()):
                 if variant not in candidates:
                     candidates.append(variant)
+            spaced = _spaced_planet_variant(query)
+            if spaced and spaced not in candidates:
+                candidates.append(spaced)
+            alias = _alias_variant(query)
+            if alias and alias not in candidates:
+                candidates.append(alias)
             for prefix in ("HIP ", "HD ", "Gaia DR3 "):
                 candidate = prefix + query
                 if candidate not in candidates:
@@ -1265,8 +1373,23 @@ Guidelines:
 - When the user asks to go somewhere or see something, use the tools rather than only describing it.
 - Before quoting distances, sizes or dates, query them with the tools. The simulation is the source of \
 truth; do not rely on recalled figures when a tool can give you the real one.
-- If an object is not found, say so plainly and suggest an alternative name or catalogue identifier. \
-Do not pretend an action succeeded.
+- Never conclude an object is unavailable from memory or assumption -- always try the tools first, and \
+exhaust the reasonable options before telling the user something is missing. In particular: (1) call \
+go_to_object directly with the name as given; for exoplanets and multi-planet systems it already recovers \
+the correct spacing and falls back to the host star on its own, so a single attempt is usually enough -- \
+do not first reason about whether the object "is probably navigable" and decline pre-emptively. \
+(2) If that errors, try find_object or search_objects before giving up: a couple of spelling variants \
+(with/without a space before a trailing letter such as "b" or "e", catalogue prefixes like "HD "/"HIP ") \
+cover most misses. Datasets such as the NASA Exoplanet Archive hold thousands of real systems, so an \
+exoplanet the user names by its real designation is very likely loaded -- treat "not found on the first \
+try" as a reason to try the next variant, not as evidence the object does not exist. Only say it is \
+missing once you have actually tried more than one way, and even then suggest an alternative name or \
+catalogue identifier rather than just stating unavailability. Never pretend an action succeeded.
+- Some catalogues (e.g. the NASA Exoplanet Archive) only instantiate a system's actual planets once the \
+camera is near its star; far away, the whole system is a single marker. If go_to_object reports it flew \
+to a host star instead of the exact planet requested, that is expected, not a failure: the planet should \
+now be loaded, so immediately call go_to_object again with the original planet name to reach it, rather \
+than concluding the planet is unavailable or asking the user what to do instead.
 - You may chain several tools to fulfil one request, for example setting the date and then flying to a planet.
 - Keep replies short and conversational. The user is looking at the visualization, not at a wall of text. \
 Explain the astronomy when it adds something, but do not lecture.

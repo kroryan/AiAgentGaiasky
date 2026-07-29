@@ -63,14 +63,18 @@ class ConnectionWorker(QtCore.QObject):
 class MarkdownBubble(QtWidgets.QTextBrowser):
     """One message, rendered as real Markdown (tables included) rather than plain text."""
 
-    def __init__(self, role: str, text: str, font_size: int = 13, parent=None):
+    def __init__(self, role: str, text: str, font_size: int = 13, on_resized=None, parent=None):
         super().__init__(parent)
+        self._on_resized = on_resized
         self.setOpenExternalLinks(True)
         self.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
         self.setReadOnly(True)
         self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Minimum)
         self.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # Break long unbroken tokens (URLs, paths, ids) too, not just at word
+        # boundaries, so they can never force the bubble wider than the panel.
+        self.setWordWrapMode(QtGui.QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
         self.document().setDocumentMargin(10)
         bg = "rgba(91, 141, 239, 0.20)" if role == "user" else "rgba(255, 255, 255, 0.08)"
         self.setStyleSheet(
@@ -80,26 +84,40 @@ class MarkdownBubble(QtWidgets.QTextBrowser):
         self.document().documentLayout().documentSizeChanged.connect(self._resize_to_content)
         self._resize_to_content()
 
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
+        super().resizeEvent(event)
+        # Rewrap to the bubble's actual current width on every resize (window
+        # resize, panel drag, first layout pass) instead of relying on the
+        # timing of Qt's own internal auto-wrap, which is what previously left
+        # stale, overflowing text until the window was manually resized.
+        self.document().setTextWidth(self.viewport().width())
+        self._resize_to_content()
+
     def _resize_to_content(self, *_args) -> None:
         height = self.document().size().height()
         self.setFixedHeight(int(height) + 20)
+        if self._on_resized:
+            self._on_resized()
 
     def set_text(self, text: str) -> None:
         self.document().setMarkdown(text)
+        self.document().setTextWidth(self.viewport().width())
         self._resize_to_content()
 
 
 class ToolLine(QtWidgets.QWidget):
     """A single collapsible line reporting one tool call, expandable to its result."""
 
-    def __init__(self, name: str, summary: str, mutating: bool, parent=None):
+    def __init__(self, name: str, summary: str, mutating: bool, on_resized=None, parent=None):
         super().__init__(parent)
+        self._on_resized = on_resized
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(4, 2, 4, 2)
         layout.setSpacing(2)
 
         icon = "⚙" if mutating else "🔍"
         self._header = QtWidgets.QLabel(f"{icon} {summary}  …")
+        self._header.setWordWrap(True)
         self._header.setStyleSheet("color: #9aa4b2; font-size: 11px;")
         self._header.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
         self._header.mousePressEvent = self._toggle
@@ -116,6 +134,8 @@ class ToolLine(QtWidgets.QWidget):
 
     def _toggle(self, _event) -> None:
         self._detail.setVisible(not self._detail.isVisible())
+        if self._on_resized:
+            self._on_resized()
 
     def set_result(self, result: str, error: bool) -> None:
         mark = "✗" if error else "✓"
@@ -123,6 +143,8 @@ class ToolLine(QtWidgets.QWidget):
         if error:
             self._header.setStyleSheet("color: #e28080; font-size: 11px;")
         self._detail.setText(result)
+        if self._on_resized:
+            self._on_resized()
 
 
 class Transcript(QtWidgets.QScrollArea):
@@ -139,23 +161,39 @@ class Transcript(QtWidgets.QScrollArea):
         self._layout.setSpacing(8)
         self._layout.addStretch(1)
         self.setWidget(self._container)
+        # "Sticky" autoscroll: stay pinned to the bottom as new content arrives
+        # or grows (e.g. the final message bubble settling into its real,
+        # wrapped height) as long as the user hasn't scrolled up to read
+        # earlier messages. Manually scrolling up disables it; scrolling back
+        # down to the bottom re-enables it.
+        self._stick_to_bottom = True
+        self.verticalScrollBar().valueChanged.connect(self._on_scroll_value_changed)
+
+    def _on_scroll_value_changed(self, value: int) -> None:
+        bar = self.verticalScrollBar()
+        self._stick_to_bottom = value >= bar.maximum() - 4
+
+    def _request_scroll(self) -> None:
+        if self._stick_to_bottom:
+            QtCore.QTimer.singleShot(0, self._scroll_to_bottom)
 
     def _insert(self, widget: QtWidgets.QWidget) -> None:
         self._layout.insertWidget(self._layout.count() - 1, widget)
-        QtCore.QTimer.singleShot(0, self._scroll_to_bottom)
+        self._request_scroll()
 
     def add_message(self, role: str, text: str) -> MarkdownBubble:
-        bubble = MarkdownBubble(role, text, font_size=self.font_size)
+        bubble = MarkdownBubble(role, text, font_size=self.font_size, on_resized=self._request_scroll)
         self._insert(bubble)
         return bubble
 
     def add_tool(self, name: str, summary: str, mutating: bool) -> ToolLine:
-        line = ToolLine(name, summary, mutating)
+        line = ToolLine(name, summary, mutating, on_resized=self._request_scroll)
         self._insert(line)
         return line
 
     def add_status(self, text: str) -> None:
         label = QtWidgets.QLabel(text)
+        label.setWordWrap(True)
         label.setStyleSheet("color: #9aa4b2; font-size: 11px; font-style: italic;")
         self._insert(label)
 

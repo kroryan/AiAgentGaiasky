@@ -44,14 +44,25 @@ Análisis de cada fix que llevaba el PR y qué implica no tenerlo:
 | Fix (commit local) | Qué arreglaba | Impacto en la app externa | Mitigación |
 |---|---|---|---|
 | `a6dd3357d` (parte): sobrecarga de 4 args de `go_to_object(String,double,double,boolean)` ignoraba `sync` | Vuelos asíncronos se volvían síncronos | **Ninguno si evitamos esa sobrecarga.** La de **5 args** `go_to_object(name, sa, pos_duration, ori_duration, sync)` respeta `sync` también en vanilla | Llamar **siempre a la sobrecarga de 5 args con parámetros nombrados** (ver §4) |
-| `f98928320` thread-safety en CameraModule (GlyphLayout corrupto al llamar la API desde hilos no-render) | Crashes esporádicos con comandos de cámara desde otro hilo | **Riesgo real**: el handler REST de Spark también invoca la API desde un hilo no-render. Es una carrera de datos poco frecuente; el scripting Py4J lleva años usándola así | Ritmo natural más lento (HTTP + latencia LLM), no encadenar cambios de foco innecesarios, y **enviar el fix como PR separado** (el maintainer se ofreció a revisarlos) |
-| `ad3ad1130` + `2b6a79a10` NPE/leak en octree al hacer fade-out | Crashes en vuelos largos por catálogos de estrellas | Riesgo residual idéntico al de cualquier usuario de vanilla; nada que hacer desde fuera | PR separado upstream |
+| `f98928320` thread-safety en CameraModule (GlyphLayout corrupto al llamar la API desde hilos no-render) | Crashes esporádicos con comandos de cámara desde otro hilo | **Riesgo real**: el handler REST de Spark también invoca la API desde un hilo no-render. Es una carrera de datos poco frecuente; el scripting Py4J lleva años usándola así | Ritmo natural más lento (HTTP + latencia LLM), no encadenar cambios de foco innecesarios, y **enviar el fix como PR separado** (el maintainer se ofreció a revisarlos). **Resuelto upstream**: el commit `650fd82e3` ("fix: NPE and memory leak when octants fade out. Thread-safety issues in camera module.", 2026-07-29) envuelve los `em.post(...)` de `CameraModule` en `api.base.post_runnable(...)`, exactamente esta clase de fix. Vive en `master`; aún no confirmado en qué release/AppImage etiquetada cae, así que la mitigación de ritmo se mantiene por si el usuario corre un build más antiguo |
+| `ad3ad1130` + `2b6a79a10` NPE/leak en octree al hacer fade-out | Crashes en vuelos largos por catálogos de estrellas | Riesgo residual idéntico al de cualquier usuario de vanilla; nada que hacer desde fuera | PR separado upstream. **Resuelto upstream** en el mismo commit `650fd82e3` (`OctreeUpdater.java`, `OctreeExtractor.java`, `ModelComponent.java`). Mismo matiz de versión que la fila de arriba |
 | `b22801644` lag de UI (bucle infinito) | Spike de lag | Era en la UI del chat interno; **no aplica** (nuestra UI es propia) | — |
 | `5bd4b396e`, `fcb60be44`, `cdd0dd71c`, `4b12ac8c7`, `afa0764b6`, `fb383dc5e` | Comportamiento del agente (modos de cámara en tours, ángulo objetivo, búsqueda, medir distancias, wait, esquema de Ollama Cloud) | Viven en el harness, **se portan íntegros a Python** (salvo `search_objects`, degradada; ver §5) | — |
 
 **Acción paralela recomendada** (fuera de este proyecto): enviar 3 PRs individuales a
 Codeberg con los fixes de CameraModule (thread-safety), `go_to_object` sync y OctreeNode.
 El maintainer dijo explícitamente que los revisaría encantado. Benefician a esta app.
+
+**Actualización 2026-07-29**: revisando el histórico de `gaiasky/` upstream, 2 de los 3
+ya están mergeados en `master` (ver notas "Resuelto upstream" en la tabla de arriba):
+thread-safety de `CameraModule` y NPE/leak de octree, ambos en `650fd82e3`. El tercero
+(`go_to_object` de 4 args ignorando `sync`) sigue presente tal cual en
+`CameraModule.java:679-684` — la mitigación de este cliente (llamar siempre a la
+sobrecarga de 5 args nombrados, §4) sigue siendo necesaria. Aparte, el maintainer
+también implementó, por su cuenta, la sugerencia de un toggle de `restPort` en la
+ventana de Preferencias (`754ed269e`, `4f1d9652d`) — ver `automaticinstallationintegration.md`.
+Ninguno de estos cambios altera el contrato REST (`/apiv2/<módulo>/<método>`) del que
+depende este cliente; no ha hecho falta tocar `gaiasky.py`/`tools.py`.
 
 ## 3. Activar la API REST en los builds oficiales
 
@@ -230,7 +241,7 @@ gaiaskyAIagent/
 
 | Riesgo | Decisión |
 |---|---|
-| Carrera de hilos en vanilla al mandar comandos de cámara vía REST (lo que arreglaba `f98928320`) | Aceptado y documentado; mitigado por el ritmo del agente; PR upstream en paralelo |
+| Carrera de hilos en vanilla al mandar comandos de cámara vía REST (lo que arreglaba `f98928320`) | Aceptado y documentado; mitigado por el ritmo del agente. **Resuelto en `master` upstream desde `650fd82e3` (2026-07-29)**; se mantiene la mitigación por si el usuario corre una versión anterior |
 | El servidor REST traga excepciones (éxito falso) | Verificación posterior en tools críticas; mensajes honestos al modelo |
 | `search_objects` sin equivalente REST | Versión degradada honesta; si upstream expone búsqueda algún día, se restaura |
 | `get_closest_object` serializa un objeto complejo | Parser defensivo con fallback |
